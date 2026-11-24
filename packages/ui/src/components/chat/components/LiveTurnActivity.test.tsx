@@ -684,6 +684,49 @@ describe('live Activity with the real message body', () => {
         }
     });
 
+    test('sums the changed files and their line counts in the row summary', async () => {
+        const record = turn([assistant('final', [text('answer', 'Done')], 'stop')]);
+        await act(async () => root.render(<Harness record={record} changedFiles={[
+            { file: 'src/a.ts', additions: 3, deletions: 1 },
+            { file: 'src/b.ts', additions: 2, deletions: 4 },
+        ]} />));
+        expect(container.querySelector('[data-changed-files-summary]')?.textContent).toBe('2 files changed+5 −5');
+        await act(async () => root.render(<Harness record={record} changedFiles={[
+            { file: 'src/a.ts', additions: 3, deletions: 1 },
+            { file: 'src/b.ts' },
+        ]} />));
+        expect(container.querySelector('[data-changed-files-summary]')?.textContent).toBe('2 files changed');
+    });
+
+    test('opens the first changed file at the turn scope from the row action', async () => {
+        const record = turn([assistant('final', [text('answer', 'Done')], 'stop')]);
+        const previousSessionId = useSessionUIStore.getState().currentSessionId;
+        await act(async () => useUIStore.getState().setPendingTurnDiffFile(null));
+        try {
+            await act(async () => root.render(
+                <ChatColumnSessionContext.Provider value={{ sessionId: 'session', directory: '/project' }}>
+                    <Harness record={record} changedFiles={[
+                        { file: 'src/a.ts', additions: 3, deletions: 1 },
+                        { file: 'src/b.ts', additions: 2, deletions: 4 },
+                    ]} />
+                </ChatColumnSessionContext.Provider>,
+            ));
+            const openChanges = Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
+                .find((button) => button.textContent === 'Open changes');
+            expect(openChanges).toBeTruthy();
+            await act(async () => openChanges?.click());
+            expect(useUIStore.getState().pendingTurnDiffFile).toEqual({
+                file: 'src/a.ts',
+                sessionId: 'session',
+                turnId: undefined,
+                panelSessionId: previousSessionId,
+            });
+        } finally {
+            await act(async () => useUIStore.getState().setPendingTurnDiffFile(null));
+            await act(async () => useSessionUIStore.setState({ currentSessionId: previousSessionId }));
+        }
+    });
+
     test('reveals the rest in source order, keeps them through updates and locale changes, then hides them with focus intact', async () => {
         const record = turn([assistant('final', [text('answer', 'Done')], 'stop')]);
         const files = Array.from({ length: 100 }, (_, index) => ({ file: `src/file-${index}.ts`, additions: 1, deletions: 0 }));

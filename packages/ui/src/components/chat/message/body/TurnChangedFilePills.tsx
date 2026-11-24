@@ -1,22 +1,15 @@
 import React from 'react';
-import { useMobileAppActions } from '@/apps/mobileAppContext';
 import type { TurnChangedFile } from '../../lib/turns/types';
 import { cn } from '@/lib/utils';
-import { useChatSessionSelection } from '../../chatColumnSession';
-import { useSessionUIStore } from '@/sync/session-ui-store';
-import { useUIStore } from '@/stores/useUIStore';
-import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
-import { opencodeClient } from '@/lib/opencode/client';
-import { openTurnFileDiffInEditor } from '../openTurnFileDiffInEditor';
-import { toast } from '@/components/ui';
 import { Icon } from '@/components/icon/Icon';
 import { HoverTooltip } from '@/components/ui/row-tooltip';
 import { useI18n } from '@/lib/i18n';
 import { FileTypeIcon } from '@/components/icons/FileTypeIcon';
 import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
+import { useIsGitRepo } from '@/stores/useGitStore';
 import { hasTextSelectionInside } from '@/lib/textSelection';
 import { DiffCount } from '@/components/ui/diff-count';
-import { FULL_CONTEXT_DIFF_LINES } from '@/components/views/diffView/diffContextLines';
+import { useTurnFileDiffOpener } from './useTurnFileDiffOpener';
 
 const getDisplayFileName = (file: string): string => {
     const normalized = file.replace(/\\/g, '/');
@@ -79,39 +72,7 @@ const StaticTurnChangedFilePills = React.memo(({ files }: { files: TurnChangedFi
 ));
 
 const InteractiveTurnChangedFilePills = React.memo(({ files, turnId }: { files: TurnChangedFile[]; turnId?: string }) => {
-    const { t } = useI18n();
-    const effectiveDirectory = useEffectiveDirectory();
-    const { sessionId } = useChatSessionSelection();
-    const isMobile = useUIStore((state) => state.isMobile);
-    const navigateToDiff = useUIStore((state) => state.navigateToDiff);
-    const openContextDiff = useUIStore((state) => state.openContextDiff);
-    const setPendingTurnDiffFile = useUIStore((state) => state.setPendingTurnDiffFile);
-    const mobileActions = useMobileAppActions();
-    const runtime = useRuntimeAPIs();
-
-    const openTurnDiff = React.useCallback((file: string) => {
-        const editor = runtime.editor;
-        if (runtime.runtime.isVSCode && editor && effectiveDirectory) {
-            if (!sessionId) return;
-            void opencodeClient.getSessionTurnDiff(sessionId, { directory: effectiveDirectory, from: turnId, context: FULL_CONTEXT_DIFF_LINES })
-                .then((turnDiff) => openTurnFileDiffInEditor({ directory: effectiveDirectory, editor, file, turnDiff }))
-                .catch(() => toast.error(t('diffView.state.failedToLoadDiff')));
-            return;
-        }
-
-        if (mobileActions) {
-            mobileActions.openChanges({ diffPath: file, scope: 'turn', turnId, sessionId, directory: effectiveDirectory });
-            return;
-        }
-
-        setPendingTurnDiffFile({ file, sessionId, turnId, panelSessionId: useSessionUIStore.getState().currentSessionId });
-        if (!isMobile && effectiveDirectory) {
-            openContextDiff(effectiveDirectory, file, false, 'turn');
-            return;
-        }
-
-        navigateToDiff(file, false, 'turn');
-    }, [effectiveDirectory, isMobile, mobileActions, navigateToDiff, openContextDiff, runtime, sessionId, setPendingTurnDiffFile, t, turnId]);
+    const openTurnDiff = useTurnFileDiffOpener(turnId);
 
     return (
         <>
@@ -128,8 +89,14 @@ const InteractiveTurnChangedFilePills = React.memo(({ files, turnId }: { files: 
 
 const CHANGED_FILE_CHIP_LIMIT = 4;
 
+const hasCounts = (file: TurnChangedFile): file is TurnChangedFile & { additions: number; deletions: number } =>
+    file.additions !== undefined && file.deletions !== undefined;
+
 export const TurnChangedFilePills = React.memo(({ files, turnId, isLatestTurn }: { files?: TurnChangedFile[]; turnId?: string; isLatestTurn: boolean }) => {
     const { t } = useI18n();
+    const effectiveDirectory = useEffectiveDirectory();
+    const isGitRepo = useIsGitRepo(effectiveDirectory ?? null);
+    const openTurnDiff = useTurnFileDiffOpener(isLatestTurn ? undefined : turnId);
     const [expanded, setExpanded] = React.useState(false);
     const toggleRef = React.useRef<HTMLButtonElement>(null);
     React.useLayoutEffect(() => {
@@ -140,17 +107,48 @@ export const TurnChangedFilePills = React.memo(({ files, turnId, isLatestTurn }:
     }, [expanded]);
     if (!files || files.length === 0) return null;
 
+    const complete = files.every(hasCounts);
+    const additions = complete ? files.reduce((total, file) => total + file.additions, 0) : 0;
+    const deletions = complete ? files.reduce((total, file) => total + file.deletions, 0) : 0;
+    const countLabel = t(files.length === 1
+        ? 'diffView.summary.changedFilesSingle'
+        : 'diffView.summary.changedFilesPlural', { count: files.length });
+    const firstOpenable = files.find((file) => file.inTurnDiff !== false);
+    const canOpenChanges = (isLatestTurn || Boolean(turnId)) && isGitRepo !== false && firstOpenable !== undefined;
+
+    const summary = (
+        <span data-changed-files-summary="" className="inline-flex items-center gap-2">
+            <span className="typography-meta shrink-0 text-muted-foreground">{countLabel}</span>
+            {complete && isGitRepo !== false ? (
+                <DiffCount added={additions} removed={deletions} className="typography-meta shrink-0" />
+            ) : null}
+        </span>
+    );
+    const openChanges = canOpenChanges ? (
+        <button
+            type="button"
+            className="typography-meta ms-auto shrink-0 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--interactive-focus-ring)]"
+            onClick={(event) => {
+                event.stopPropagation();
+                openTurnDiff(firstOpenable.file);
+            }}
+        >
+            {t('chat.workStatus.action.openChanges')}
+        </button>
+    ) : null;
+
     const hiddenCount = files.length - CHANGED_FILE_CHIP_LIMIT;
     const renderFiles = (visibleFiles: TurnChangedFile[]) => isLatestTurn || turnId
         ? <InteractiveTurnChangedFilePills files={visibleFiles} turnId={isLatestTurn ? undefined : turnId} />
         : <StaticTurnChangedFilePills files={visibleFiles} />;
-    if (hiddenCount <= 0) return renderFiles(files);
+    if (hiddenCount <= 0) return <>{summary}{renderFiles(files)}{openChanges}</>;
 
     const label = expanded
         ? t('chat.changedFiles.actions.showFewer')
         : t('chat.changedFiles.actions.otherFiles', { count: hiddenCount });
     return (
         <>
+            {summary}
             {renderFiles(expanded ? files : files.slice(0, CHANGED_FILE_CHIP_LIMIT))}
             <HoverTooltip label={label}>
                 <button
@@ -173,6 +171,7 @@ export const TurnChangedFilePills = React.memo(({ files, turnId, isLatestTurn }:
                     </span>
                 </button>
             </HoverTooltip>
+            {openChanges}
         </>
     );
 });
